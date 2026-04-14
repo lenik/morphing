@@ -54,20 +54,15 @@ def _heuristic_analyze_story(story_text: str, title: str) -> dict[str, Any]:
     return {"characters": characters, "scenes": scenes, "actions": actions}
 
 
-def _ai_analyze_story(
-    *,
-    story_text: str,
-    title: str,
-    api_key: str | None,
-    base_url: str | None,
-    model: str | None,
-) -> dict[str, Any]:
+def resolve_story_ai_settings(api_key: str | None, base_url: str | None, model: str | None) -> tuple[str, str, str]:
     key = (api_key or "").strip() or (settings.openai_api_key or "").strip()
-    if not key:
-        return _heuristic_analyze_story(story_text, title)
     b_url = (base_url or "").strip().rstrip("/") or settings.openai_base_url.rstrip("/")
     mdl = (model or "").strip() or settings.openai_default_model
-    prompt = (
+    return key, b_url, mdl
+
+
+def build_story_analyze_prompt(*, story_text: str, title: str) -> str:
+    return (
         "Analyze the story and return JSON with keys: characters, scenes, actions.\n"
         'characters: array of {"name": string, "description": string, "personality": string, "age": string}\n'
         'scenes: array of {"title": string, "description": string, "location": string, "time": string}\n'
@@ -76,6 +71,31 @@ def _ai_analyze_story(
         f"Story title: {title}\n\n"
         f"Story content:\n{story_text[:12000]}"
     )
+
+
+def parse_story_analysis_raw(raw: str) -> dict[str, Any]:
+    parsed = json.loads(raw)
+    if not isinstance(parsed, dict):
+        raise ValueError("Story analysis response is not a JSON object.")
+    return {
+        "characters": parsed.get("characters") if isinstance(parsed.get("characters"), list) else [],
+        "scenes": parsed.get("scenes") if isinstance(parsed.get("scenes"), list) else [],
+        "actions": parsed.get("actions") if isinstance(parsed.get("actions"), list) else [],
+    }
+
+
+def _ai_analyze_story(
+    *,
+    story_text: str,
+    title: str,
+    api_key: str | None,
+    base_url: str | None,
+    model: str | None,
+) -> dict[str, Any]:
+    key, b_url, mdl = resolve_story_ai_settings(api_key, base_url, model)
+    if not key:
+        raise RuntimeError("Composer requires OpenAI-compatible API key; fallback is disabled.")
+    prompt = build_story_analyze_prompt(story_text=story_text, title=title)
     try:
         with httpx.Client(timeout=120.0) as client:
             r = client.post(
@@ -85,20 +105,16 @@ def _ai_analyze_story(
                     "model": mdl,
                     "messages": [{"role": "user", "content": prompt}],
                     "response_format": {"type": "json_object"},
+                    "temperature": 0.25,
+                    "top_p": 0.9,
+                    "reasoning_effort": "none",
                 },
             )
             r.raise_for_status()
             raw = r.json()["choices"][0]["message"]["content"]
-            parsed = json.loads(raw)
-            if not isinstance(parsed, dict):
-                return _heuristic_analyze_story(story_text, title)
-            return {
-                "characters": parsed.get("characters") if isinstance(parsed.get("characters"), list) else [],
-                "scenes": parsed.get("scenes") if isinstance(parsed.get("scenes"), list) else [],
-                "actions": parsed.get("actions") if isinstance(parsed.get("actions"), list) else [],
-            }
-    except Exception:
-        return _heuristic_analyze_story(story_text, title)
+            return parse_story_analysis_raw(raw)
+    except Exception as e:
+        raise RuntimeError(f"Composer AI analysis failed: {type(e).__name__}: {str(e)[:220]}") from e
 
 
 def compose_story(
@@ -168,23 +184,14 @@ def derive_script(db: Session, story_id: str, author: str = "") -> Element | Non
     return script
 
 
-def compose_story_graph_from_text(
+def compose_story_graph_from_analysis(
     db: Session,
     *,
     title: str,
     story_text: str,
+    analyzed: dict[str, Any],
     author: str = "",
-    api_key: str | None = None,
-    base_url: str | None = None,
-    model: str | None = None,
 ) -> tuple[Element, str, list[str], int]:
-    analyzed = _ai_analyze_story(
-        story_text=story_text,
-        title=title,
-        api_key=api_key,
-        base_url=base_url,
-        model=model,
-    )
     raw_characters = analyzed.get("characters") if isinstance(analyzed.get("characters"), list) else []
     raw_scenes = analyzed.get("scenes") if isinstance(analyzed.get("scenes"), list) else []
     raw_actions = analyzed.get("actions") if isinstance(analyzed.get("actions"), list) else []
@@ -368,6 +375,32 @@ def compose_story_graph_from_text(
                     relation_count += 1
 
     return story, focus_id, created_ids, relation_count
+
+
+def compose_story_graph_from_text(
+    db: Session,
+    *,
+    title: str,
+    story_text: str,
+    author: str = "",
+    api_key: str | None = None,
+    base_url: str | None = None,
+    model: str | None = None,
+) -> tuple[Element, str, list[str], int]:
+    analyzed = _ai_analyze_story(
+        story_text=story_text,
+        title=title,
+        api_key=api_key,
+        base_url=base_url,
+        model=model,
+    )
+    return compose_story_graph_from_analysis(
+        db,
+        title=title,
+        story_text=story_text,
+        analyzed=analyzed,
+        author=author,
+    )
 
 
 def preview_story_graph_from_text(

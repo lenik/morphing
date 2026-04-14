@@ -35,6 +35,7 @@ export function AppSettingsProvider({ children }: { children: React.ReactNode })
             Math.min(1, remote.aiCompletionAcceptConfidence ?? local.aiCompletionAcceptConfidence ?? 0.6),
           ),
           apiBaseUrl: remote.apiBaseUrl || local.apiBaseUrl || '',
+          elementListLimit: Math.max(1, Math.min(500, remote.elementListLimit ?? local.elementListLimit ?? 500)),
         }
         persistSettings(merged)
         setSettings(merged)

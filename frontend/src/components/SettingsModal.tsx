@@ -225,6 +225,20 @@ export function SettingsModal({ open, onClose }: Props) {
                 autoComplete="off"
               />
             </label>
+            <label className="settings-field">
+              <span>Element list limit (1 - 500)</span>
+              <input
+                inputMode="numeric"
+                value={String(draft.elementListLimit)}
+                onChange={(e) => {
+                  const n = parseInt(e.target.value, 10)
+                  setDraft((d) => ({
+                    ...d,
+                    elementListLimit: Number.isFinite(n) ? Math.max(1, Math.min(500, n)) : d.elementListLimit,
+                  }))
+                }}
+              />
+            </label>
             <label className="settings-field settings-field--check">
               <input
                 type="checkbox"

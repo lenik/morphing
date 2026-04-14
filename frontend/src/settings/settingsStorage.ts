@@ -15,6 +15,8 @@ export type AppSettings = {
   defaultAuthorName: string
   /** UI language tag for future i18n */
   locale: string
+  /** Max elements fetched for navigator/list (1-500). */
+  elementListLimit: number
 }
 
 export const DEFAULT_APP_SETTINGS: AppSettings = {
@@ -29,6 +31,7 @@ export const DEFAULT_APP_SETTINGS: AppSettings = {
   useBrowserNotifications: true,
   defaultAuthorName: '',
   locale: 'en',
+  elementListLimit: 500,
 }
 
 let runtimeSettings: AppSettings = { ...DEFAULT_APP_SETTINGS }

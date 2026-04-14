@@ -159,6 +159,8 @@ export async function completeSlots(body: {
   extra_slots: Record<string, string>
   extra_slot_confidences: Record<string, number>
   accepted_extra_slots: Record<string, string>
+  accepted_title?: string | null
+  accepted_body?: string | null
   applied_threshold: number
   ai_trace: AiTrace
 }> {
@@ -168,6 +170,92 @@ export async function completeSlots(body: {
     body: JSON.stringify(body),
   })
   return json(res)
+}
+
+export async function completeSlotsStream(
+  body: {
+    title: string
+    type_hint: string
+    content: string
+    openai_api_key?: string
+    openai_base_url?: string
+    model?: string
+    accept_confidence?: number
+    allow_custom_facets?: boolean
+    show_complete_request_to_llm?: boolean
+    locale?: string
+  },
+  handlers: {
+    onDelta?: (text: string) => void
+    onReasoning?: (text: string) => void
+    onErrorEvent?: (message: string) => void
+  } = {},
+): Promise<{
+  slots: Record<string, string>
+  slot_confidences: Record<string, number>
+  accepted_slots: Record<string, string>
+  extra_slots: Record<string, string>
+  extra_slot_confidences: Record<string, number>
+  accepted_extra_slots: Record<string, string>
+  accepted_title?: string | null
+  accepted_body?: string | null
+  applied_threshold: number
+  ai_trace: AiTrace
+}> {
+  const res = await fetch(`${getApiBaseUrl()}/ai/complete-slots-stream`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+  })
+  if (!res.ok) {
+    const text = await res.text()
+    throw new Error(text || res.statusText)
+  }
+  if (!res.body) throw new Error('No stream body from server.')
+
+  const reader = res.body.getReader()
+  const decoder = new TextDecoder()
+  let buffer = ''
+  let finalPayload: any = null
+  while (true) {
+    const { done, value } = await reader.read()
+    if (done) break
+    buffer += decoder.decode(value, { stream: true })
+    const lines = buffer.split('\n')
+    buffer = lines.pop() ?? ''
+    for (const rawLine of lines) {
+      const line = rawLine.trim()
+      if (!line) continue
+      let evt: any
+      try {
+        evt = JSON.parse(line)
+      } catch {
+        continue
+      }
+      if (evt.type === 'delta' && typeof evt.text === 'string') {
+        handlers.onDelta?.(evt.text)
+      } else if (evt.type === 'reasoning' && typeof evt.text === 'string') {
+        handlers.onReasoning?.(evt.text)
+      } else if (evt.type === 'error' && typeof evt.message === 'string') {
+        handlers.onErrorEvent?.(evt.message)
+      } else if (evt.type === 'final') {
+        finalPayload = evt
+      }
+    }
+  }
+  if (!finalPayload) throw new Error('Stream finished without final payload.')
+  return {
+    slots: finalPayload.slots || {},
+    slot_confidences: finalPayload.slot_confidences || {},
+    accepted_slots: finalPayload.accepted_slots || {},
+    extra_slots: finalPayload.extra_slots || {},
+    extra_slot_confidences: finalPayload.extra_slot_confidences || {},
+    accepted_extra_slots: finalPayload.accepted_extra_slots || {},
+    accepted_title: finalPayload.accepted_title ?? null,
+    accepted_body: finalPayload.accepted_body ?? null,
+    applied_threshold: Number(finalPayload.applied_threshold ?? 0.6),
+    ai_trace: finalPayload.ai_trace || {},
+  }
 }
 
 export async function fetchCollectionsContaining(elementId: string): Promise<Element[]> {

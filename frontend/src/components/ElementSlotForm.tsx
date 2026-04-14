@@ -2,7 +2,7 @@ import { useMemo, useState } from 'react'
 import type { Element } from '../api/types'
 import type { SlotFieldDef } from '../domain/elementSlotsTypes'
 import { getViewConfig } from '../domain/elementSlots'
-import { IconClapperboard, IconDatabase, IconGitBranch, IconLayers, IconZap } from './ui/icons'
+import { IconClapperboard, IconDatabase, IconGitBranch, IconLayers, IconRefreshCw, IconZap } from './ui/icons'
 import { SlotFieldIcon, SlotGroupIcon } from './slotIcons'
 
 type Props = {
@@ -13,6 +13,9 @@ type Props = {
   onSlotDelete?: (key: string) => void
   shotOrder?: string
   onShotOrderChange?: (v: string) => void
+  aiChanges?: Record<string, { oldValue: string; newValue: string }>
+  onUndoAiChange?: (key: string) => void
+  activeAiField?: string | null
 }
 
 export function ElementSlotForm({
@@ -23,6 +26,9 @@ export function ElementSlotForm({
   onSlotDelete = () => undefined,
   shotOrder = '',
   onShotOrderChange = () => undefined,
+  aiChanges = {},
+  onUndoAiChange = () => undefined,
+  activeAiField = null,
 }: Props) {
   const cfg = getViewConfig(typeHint)
   const grouped = useMemo(() => groupSlots(cfg.slots), [cfg.slots])
@@ -53,7 +59,15 @@ export function ElementSlotForm({
           </h5>
           <div className="element-slots__grid">
             {fields.map((f) => (
-              <SlotField key={f.key} def={f} value={slotValues[f.key] ?? ''} onChange={(v) => onSlotChange(f.key, v)} />
+              <SlotField
+                key={f.key}
+                def={f}
+                value={slotValues[f.key] ?? ''}
+                onChange={(v) => onSlotChange(f.key, v)}
+                aiChange={aiChanges[f.key]}
+                onUndo={() => onUndoAiChange(f.key)}
+                isActive={activeAiField === f.key}
+              />
             ))}
           </div>
         </div>
@@ -142,16 +156,29 @@ function SlotField({
   def,
   value,
   onChange,
+  aiChange,
+  onUndo,
+  isActive,
 }: {
   def: SlotFieldDef
   value: string
   onChange: (v: string) => void
+  aiChange?: { oldValue: string; newValue: string }
+  onUndo: () => void
+  isActive: boolean
 }) {
   return (
-    <label className="create-form__field">
-      <span className="icon-label">
-        <SlotFieldIcon def={def} />
-        {def.label}
+    <label className={`create-form__field ${isActive ? 'create-form__field--ai-focus' : ''}`} data-ai-field={`slot:${def.key}`}>
+      <span className="icon-label create-form__field-head">
+        <span className="icon-label">
+          <SlotFieldIcon def={def} />
+          {def.label}
+        </span>
+        {aiChange ? (
+          <button type="button" className="create-form__undo" onClick={onUndo} title="Undo AI change">
+            <IconRefreshCw size={12} />
+          </button>
+        ) : null}
       </span>
       {def.multiline ? (
         <textarea
@@ -163,6 +190,7 @@ function SlotField({
       ) : (
         <input value={value} onChange={(e) => onChange(e.target.value)} placeholder={def.placeholder} />
       )}
+      {aiChange ? <small className="create-form__old-value">Old: {aiChange.oldValue || '(empty)'}</small> : null}
     </label>
   )
 }

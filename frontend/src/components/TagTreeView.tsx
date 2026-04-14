@@ -4,7 +4,7 @@ import type { Element } from '../api/types'
 import type { TrieChild, TrieTagNode } from '../utils/tagTree'
 import { SYNTHETIC_CO, TAG_UNTAGGED } from '../utils/tagTree'
 import { TAG_DISPLAY } from './tagTreeConstants'
-import { IconFileText, IconLayers, IconNetwork, IconTag, IconZap } from './ui/icons'
+import { IconChevronDown, IconChevronRight, IconFileText, IconLayers, IconNetwork, IconTag, IconZap } from './ui/icons'
 
 export const ELEMENT_DRAG_MIME = 'application/x-morphing-element-id'
 
@@ -114,15 +114,22 @@ function TagTreeItem({
     )
   }
   const label = node.tag === '' ? null : formatTagLabel(node.tag)
+  const [open, setOpen] = useState(true)
   return (
     <li className="tag-tree__branch">
       {label ? (
-        <span className="tag-tree__tag icon-label">
+        <button
+          type="button"
+          className="tag-tree__tag icon-label"
+          onClick={() => setOpen((v) => !v)}
+          aria-expanded={open}
+        >
+          {open ? <IconChevronDown size={13} /> : <IconChevronRight size={13} />}
           <TagGlyph tag={node.tag} />
           <span>{label}</span>
-        </span>
+        </button>
       ) : null}
-      <TagTreeView nodes={node.children} depth={depth + 1} elementsById={elementsById} />
+      {open ? <TagTreeView nodes={node.children} depth={depth + 1} elementsById={elementsById} /> : null}
     </li>
   )
 }

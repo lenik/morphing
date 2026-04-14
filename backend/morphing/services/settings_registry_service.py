@@ -22,6 +22,7 @@ DEFAULT_APP_SETTINGS: dict[str, Any] = {
     "useBrowserNotifications": True,
     "defaultAuthorName": "",
     "locale": "en",
+    "elementListLimit": 500,
 }
 
 _cache_lock = Lock()
@@ -52,6 +53,11 @@ def _normalize(payload: dict[str, Any]) -> dict[str, Any]:
     next_val["useBrowserNotifications"] = bool(next_val.get("useBrowserNotifications", True))
     next_val["defaultAuthorName"] = str(next_val.get("defaultAuthorName", "")).strip()
     next_val["locale"] = str(next_val.get("locale", "en")).strip() or "en"
+    try:
+        list_limit = int(next_val.get("elementListLimit", 500))
+    except Exception:
+        list_limit = 500
+    next_val["elementListLimit"] = max(1, min(500, list_limit))
     return next_val
 
 

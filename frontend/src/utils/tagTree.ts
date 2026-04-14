@@ -180,8 +180,8 @@ function nextId(prefix: string) {
   return `${prefix}-${nextNodeId++}`
 }
 
-/** Insert one path without merging duplicate tag nodes. */
-function insertPathNoMerge(
+/** Insert one path and merge sibling tag nodes with same name. */
+function insertPathMerged(
   root: TrieTagNode,
   pathTags: string[],
   el: Element,
@@ -189,14 +189,17 @@ function insertPathNoMerge(
 ) {
   let node = root
   for (const t of pathTags) {
-    const child: TrieTagNode = {
-      kind: 'tag',
-      id: nextId('tag'),
-      tag: t,
-      freq: t === SYNTHETIC_CO ? 0 : (freq.get(t) ?? 0),
-      children: [],
+    let child = node.children.find((c): c is TrieTagNode => c.kind === 'tag' && c.tag === t)
+    if (!child) {
+      child = {
+        kind: 'tag',
+        id: nextId('tag'),
+        tag: t,
+        freq: t === SYNTHETIC_CO ? 0 : (freq.get(t) ?? 0),
+        children: [],
+      }
+      node.children.push(child)
     }
-    node.children.push(child)
     node = child
   }
   const title = el.title?.trim() || '(untitled)'
@@ -227,7 +230,7 @@ function sortTrieRecursive(node: TrieTagNode, freq: Map<string, number>) {
 }
 
 /**
- * Build the tag trie for a filtered element list (no merging of identical tag strings).
+ * Build the tag trie for a filtered element list.
  */
 export function buildTagTrieForElements(elements: Element[]): TrieTagNode {
   nextNodeId = 1
@@ -237,7 +240,7 @@ export function buildTagTrieForElements(elements: Element[]): TrieTagNode {
 
   for (const el of elements) {
     const path = buildPathForElement(el, freq, canBeRoot)
-    insertPathNoMerge(root, path, el, freq)
+    insertPathMerged(root, path, el, freq)
   }
 
   sortTrieRecursive(root, freq)

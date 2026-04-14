@@ -1,6 +1,7 @@
 import { createContext, useCallback, useContext, useEffect, useState, type ReactNode } from 'react'
 import { fetchElements } from '../api/client'
 import type { Element } from '../api/types'
+import { useAppSettings } from './AppSettingsContext'
 
 type Ctx = {
   elements: Element[]
@@ -14,6 +15,7 @@ type Ctx = {
 const ElementsContext = createContext<Ctx | null>(null)
 
 export function ElementsProvider({ children }: { children: ReactNode }) {
+  const { settings } = useAppSettings()
   const [elements, setElements] = useState<Element[]>([])
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
@@ -22,14 +24,14 @@ export function ElementsProvider({ children }: { children: ReactNode }) {
     setError(null)
     setLoading(true)
     try {
-      const data = await fetchElements({ limit: 500 })
+      const data = await fetchElements({ limit: Math.max(1, Math.min(500, settings.elementListLimit || 500)) })
       setElements(data)
     } catch (e) {
       setError((e as Error).message)
     } finally {
       setLoading(false)
     }
-  }, [])
+  }, [settings.elementListLimit])
 
   const upsertElement = useCallback((el: Element) => {
     setElements((prev) => {

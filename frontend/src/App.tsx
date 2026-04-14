@@ -1,8 +1,8 @@
-import { useState } from 'react'
-import { BrowserRouter, Link, Route, Routes, useLocation } from 'react-router-dom'
+import { useEffect, useRef, useState } from 'react'
+import { HashRouter, Link, Route, Routes, useLocation } from 'react-router-dom'
 import { AiChatPanel } from './components/AiChatPanel'
 import { SettingsModal } from './components/SettingsModal'
-import { IconBookOpen, IconLayers, IconNetwork, IconSettings, IconStore } from './components/ui/icons'
+import { IconBookOpen, IconLayers, IconMessageSquare, IconNetwork, IconSettings, IconStore } from './components/ui/icons'
 import { AiChatProvider } from './context/AiChatContext'
 import { AppSettingsProvider } from './context/AppSettingsContext'
 import { ComposerPage } from './pages/ComposerPage'
@@ -38,13 +38,49 @@ function AppShell() {
   const showAiPanel = loc.pathname.startsWith('/elements') || loc.pathname.startsWith('/composer')
   const fullWidth = showAiPanel
   const [settingsOpen, setSettingsOpen] = useState(false)
+  const [isPortrait, setIsPortrait] = useState(false)
+  const [appMenuVisible, setAppMenuVisible] = useState(true)
+  const [aiPanelVisible, setAiPanelVisible] = useState(true)
+  const touchStartY = useRef<number | null>(null)
+
+  useEffect(() => {
+    const check = () => setIsPortrait(window.matchMedia('(orientation: portrait)').matches)
+    check()
+    window.addEventListener('resize', check)
+    return () => window.removeEventListener('resize', check)
+  }, [])
+
+  useEffect(() => {
+    if (isPortrait) {
+      setAppMenuVisible(false)
+      setAiPanelVisible(false)
+    } else {
+      setAppMenuVisible(true)
+      setAiPanelVisible(true)
+    }
+  }, [isPortrait])
+
+  const onTopbarTouchStart = (e: React.TouchEvent<HTMLElement>) => {
+    touchStartY.current = e.touches[0]?.clientY ?? null
+  }
+
+  const onTopbarTouchEnd = (e: React.TouchEvent<HTMLElement>) => {
+    if (!isPortrait) return
+    const y0 = touchStartY.current
+    const y1 = e.changedTouches[0]?.clientY
+    touchStartY.current = null
+    if (y0 == null || y1 == null) return
+    if (y1 - y0 >= 36) setAppMenuVisible(true)
+  }
+
+  const showAiPanelEffective = showAiPanel && aiPanelVisible
   return (
     <div className="app-shell">
-      <header className="topbar">
+      <header className={`topbar ${isPortrait ? 'topbar--portrait' : ''}`} onTouchStart={onTopbarTouchStart} onTouchEnd={onTopbarTouchEnd}>
         <Link to="/" className="brand">
           Morphing
         </Link>
-        <nav className="topbar__nav">
+        <nav className={`topbar__nav ${appMenuVisible ? '' : 'topbar__nav--hidden'}`}>
           <Link to="/elements" className="topbar__nav-link icon-label">
             <IconLayers size={15} />
             <span>Elements</span>
@@ -62,6 +98,18 @@ function AppShell() {
             <span>Marketplace</span>
           </Link>
         </nav>
+        {showAiPanel ? (
+          <button
+            type="button"
+            className={`topbar__settings-btn icon-label ${aiPanelVisible ? 'is-active' : ''}`}
+            onClick={() => setAiPanelVisible((v) => !v)}
+            title="Toggle AI chat panel"
+            aria-label="Toggle AI chat panel"
+          >
+            <IconMessageSquare size={16} />
+            <span>AI</span>
+          </button>
+        ) : null}
         <button
           type="button"
           className="topbar__settings-btn icon-label"
@@ -95,7 +143,7 @@ function AppShell() {
           <Route path="/marketplace" element={<MarketplacePage />} />
         </Routes>
         </main>
-        {showAiPanel ? <AiChatPanel /> : null}
+        {showAiPanelEffective ? <AiChatPanel /> : null}
       </div>
     </div>
   )
@@ -103,12 +151,12 @@ function AppShell() {
 
 export default function App() {
   return (
-    <BrowserRouter>
+    <HashRouter>
       <AppSettingsProvider>
         <AiChatProvider>
           <AppShell />
         </AiChatProvider>
       </AppSettingsProvider>
-    </BrowserRouter>
+    </HashRouter>
   )
 }

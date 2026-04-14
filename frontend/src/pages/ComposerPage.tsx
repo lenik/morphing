@@ -1,120 +1,48 @@
-import { useMemo, useRef, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { Link, useNavigate } from 'react-router-dom'
 import { getApiBaseUrl } from '../api/baseUrl'
+import { useAiChat } from '../context/AiChatContext'
 import { handleFormEnterToSubmitKeyDown, notifySuccess } from '../notify'
 import { loadSettings } from '../settings/settingsStorage'
 
 export function ComposerPage() {
   const nav = useNavigate()
+  const { startOperation, endOperation, pushTrace, pushNote } = useAiChat()
   const [title, setTitle] = useState('New story')
   const [storyText, setStoryText] = useState('')
   const [author, setAuthor] = useState('')
   const [submitting, setSubmitting] = useState(false)
-  const [previewing, setPreviewing] = useState(false)
-  const [preview, setPreview] = useState<{
-    title: string
-    estimated_elements_by_type: Record<string, number>
-    estimated_relation_count: number
-    preview_names: Record<string, string[]>
-    timeline_nodes: { type_hint: string; items: { name: string; [k: string]: string }[] }[]
-  } | null>(null)
-  const [activeTypeIdx, setActiveTypeIdx] = useState(-1)
-  const [revealedCount, setRevealedCount] = useState<Record<string, number>>({})
   const [overallProgress, setOverallProgress] = useState(0)
-  const timerRef = useRef<number | null>(null)
+  const progressScrollRef = useRef<HTMLDivElement | null>(null)
+  const [liveOutput, setLiveOutput] = useState('')
+  const [liveReasoning, setLiveReasoning] = useState('')
+  const [progressOpen, setProgressOpen] = useState(false)
   const [err, setErr] = useState<string | null>(null)
-  type PreviewData = {
-    title: string
-    estimated_elements_by_type: Record<string, number>
-    estimated_relation_count: number
-    preview_names: Record<string, string[]>
-    timeline_nodes: { type_hint: string; items: { name: string; [k: string]: string }[] }[]
-  }
-
-  function stopTimelineTimer() {
-    if (timerRef.current != null) {
-      window.clearInterval(timerRef.current)
-      timerRef.current = null
-    }
-  }
-
-  function startTimelineAnimation(nodes: { type_hint: string; items: { name: string }[] }[]) {
-    stopTimelineTimer()
-    setActiveTypeIdx(0)
-    setRevealedCount({})
-    const totalSteps = nodes.reduce((s, n) => s + Math.max(1, n.items.length), 0)
-    let done = 0
-    let typeIdx = 0
-    let inTypeItemIdx = 0
-    timerRef.current = window.setInterval(() => {
-      if (typeIdx >= nodes.length) {
-        stopTimelineTimer()
-        return
-      }
-      setActiveTypeIdx(typeIdx)
-      const node = nodes[typeIdx]
-      const itemLen = Math.max(1, node.items.length)
-      const nextReveal = Math.min(itemLen, inTypeItemIdx + 1)
-      setRevealedCount((prev) => ({ ...prev, [node.type_hint]: nextReveal }))
-      inTypeItemIdx += 1
-      done += 1
-      setOverallProgress(Math.min(92, Math.round((done / totalSteps) * 92)))
-      if (inTypeItemIdx >= itemLen) {
-        typeIdx += 1
-        inTypeItemIdx = 0
-      }
-    }, 350)
-  }
-
-  async function runPreview(): Promise<PreviewData | null> {
-    if (!storyText.trim() || previewing) return null
-    setErr(null)
-    setPreviewing(true)
-    try {
-      const s = loadSettings()
-      const res = await fetch(`${getApiBaseUrl()}/composer/stories/preview`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          title,
-          story_text: storyText,
-          author,
-          openai_api_key: s.openaiApiKey || undefined,
-          openai_base_url: s.openaiApiBaseUrl || undefined,
-          model: s.openaiDefaultModel || undefined,
-        }),
-      })
-      if (!res.ok) {
-        setErr(await res.text())
-        return null
-      }
-      const data = (await res.json()) as PreviewData
-      setPreview(data)
-      setActiveTypeIdx(-1)
-      setRevealedCount({})
-      setOverallProgress(0)
-      return data
-    } finally {
-      setPreviewing(false)
-    }
-    return null
-  }
 
   async function submit(e: React.FormEvent) {
     e.preventDefault()
     if (submitting) return
     setErr(null)
     setSubmitting(true)
+    setProgressOpen(true)
+    setOverallProgress(2)
+    setLiveOutput('')
+    setLiveReasoning('')
     try {
-      let previewData = preview
-      if (!previewData) {
-        previewData = await runPreview()
-      }
-      if (previewData?.timeline_nodes?.length) {
-        startTimelineAnimation(previewData.timeline_nodes)
-      }
       const s = loadSettings()
-      const res = await fetch(`${getApiBaseUrl()}/composer/stories`, {
+      const reqPayload = {
+        endpoint: `${getApiBaseUrl()}/composer/stories/stream`,
+        method: 'POST',
+        body: {
+          title,
+          story_text: storyText,
+          author,
+          openai_base_url: s.openaiApiBaseUrl || undefined,
+          model: s.openaiDefaultModel || undefined,
+        },
+      }
+      startOperation('Compose', 'Generating story graph from AI stream.', JSON.stringify(reqPayload, null, 2))
+      const res = await fetch(`${getApiBaseUrl()}/composer/stories/stream`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -126,35 +54,79 @@ export function ComposerPage() {
           model: s.openaiDefaultModel || undefined,
         }),
       })
-      if (!res.ok) {
-        setErr(await res.text())
+      if (!res.ok || !res.body) {
+        setErr((await res.text()) || 'Composer stream failed.')
         return
       }
-      const data = (await res.json()) as {
-        story_id: string
-        focus_element_id: string
-        created_element_ids: string[]
+
+      const reader = res.body.getReader()
+      const decoder = new TextDecoder()
+      let buffer = ''
+      let streamOutput = ''
+      let finalData: { story_id: string; focus_element_id: string; created_element_ids: string[] } | null = null
+      while (true) {
+        const { done, value } = await reader.read()
+        if (done) break
+        buffer += decoder.decode(value, { stream: true })
+        const lines = buffer.split('\n')
+        buffer = lines.pop() ?? ''
+        for (const rawLine of lines) {
+          const line = rawLine.trim()
+          if (!line) continue
+          let evt: any
+          try {
+            evt = JSON.parse(line)
+          } catch {
+            continue
+          }
+          if (evt.type === 'delta' && typeof evt.text === 'string') {
+            streamOutput += evt.text
+            setLiveOutput((prev) => {
+              const next = prev + evt.text
+              setOverallProgress(Math.min(86, 4 + Math.floor(next.length / 30)))
+              return next
+            })
+          } else if (evt.type === 'reasoning' && typeof evt.text === 'string') {
+            setLiveReasoning((prev) => prev + evt.text)
+          } else if (evt.type === 'error') {
+            throw new Error(String(evt.message || 'Composer stream error'))
+          } else if (evt.type === 'final') {
+            finalData = evt
+          }
+        }
       }
-      stopTimelineTimer()
-      setActiveTypeIdx(Math.max(0, (previewData?.timeline_nodes?.length || 1) - 1))
+      if (!finalData) throw new Error('Composer stream finished without final payload.')
       setOverallProgress(100)
-      void notifySuccess('Story graph created', `Generated ${data.created_element_ids.length} elements`)
-      nav(`/elements/${data.focus_element_id || data.story_id}`)
+      pushTrace('Compose', {
+        summary: `Created ${finalData.created_element_ids.length} elements`,
+        key_prompt: JSON.stringify(reqPayload, null, 2),
+        assistant_excerpt: streamOutput || JSON.stringify(finalData, null, 2),
+      })
+      void notifySuccess('Story graph created', `Generated ${finalData.created_element_ids.length} elements`)
+      nav(`/elements/${finalData.focus_element_id || finalData.story_id}`)
+    } catch (e) {
+      setErr((e as Error).message)
+      pushNote('Compose', `Failed: ${(e as Error).message}`)
     } finally {
-      stopTimelineTimer()
+      endOperation()
       setSubmitting(false)
     }
   }
 
-  const timelineNodes = useMemo(() => preview?.timeline_nodes || [], [preview])
+  useEffect(() => {
+    if (!progressOpen) return
+    const el = progressScrollRef.current
+    if (!el) return
+    el.scrollTop = el.scrollHeight
+  }, [progressOpen, liveOutput, liveReasoning, overallProgress])
 
   return (
-    <div className="page">
+    <div className="page composer-page">
       <header className="page__header">
         <h1>Story composer</h1>
         <Link to="/elements">Elements</Link>
       </header>
-      <form className="form" onKeyDown={handleFormEnterToSubmitKeyDown} onSubmit={(e) => void submit(e)}>
+      <form className="form composer-form" onKeyDown={handleFormEnterToSubmitKeyDown} onSubmit={(e) => void submit(e)}>
         <label>
           Title
           <input value={title} onChange={(e) => setTitle(e.target.value)} />
@@ -165,7 +137,6 @@ export function ComposerPage() {
             value={storyText}
             onChange={(e) => {
               setStoryText(e.target.value)
-              setPreview(null)
             }}
             placeholder="Paste or write your story draft. AI will create characters, scenes, script/storyboard/shots and relations."
             rows={14}
@@ -177,65 +148,47 @@ export function ComposerPage() {
         </label>
         {err ? <p className="error">{err}</p> : null}
         <div className="row" style={{ gap: '0.6rem' }}>
-          <button type="button" onClick={() => void runPreview()} disabled={previewing || submitting || !storyText.trim()}>
-            {previewing ? 'Analyzing…' : 'Preview graph'}
-          </button>
-          <button type="submit" disabled={submitting || previewing || !storyText.trim()}>
-            {submitting ? 'Creating graph…' : 'Confirm and create graph'}
+          <button type="submit" disabled={submitting || !storyText.trim()}>
+            {submitting ? 'Composing…' : 'Compose'}
           </button>
         </div>
-        {preview ? (
-          <section className="composer-progress">
-            <h3 style={{ margin: 0, fontSize: '0.95rem' }}>Preview</h3>
-            <p className="muted" style={{ margin: '0.45rem 0' }}>
-              Estimated relations: {preview.estimated_relation_count}
-            </p>
-            <p style={{ margin: '0.35rem 0' }}>
-              {Object.entries(preview.estimated_elements_by_type)
-                .map(([k, v]) => `${k}: ${v}`)
-                .join(' · ')}
-            </p>
-            <div className="composer-progress__timeline">
-              <ol className="composer-progress__line">
-                {timelineNodes.map((node, idx) => {
-                  const isActive = idx === activeTypeIdx
-                  const isDone = idx < activeTypeIdx
-                  const visible = revealedCount[node.type_hint] ?? 0
-                  return (
-                    <li key={node.type_hint} className="composer-progress__node-row">
-                      <div className="composer-progress__node-left">
-                        <span
-                          className={`composer-progress__dot ${isActive ? 'is-active' : ''} ${isDone ? 'is-done' : ''}`}
-                        />
-                        <span className={`composer-progress__type ${isActive ? 'is-active' : ''}`}>
-                          Type {node.type_hint}
-                        </span>
-                      </div>
-                      <div className="composer-progress__node-right">
-                        {(isActive || isDone) &&
-                          node.items.slice(0, visible || (isDone ? node.items.length : 0)).map((it, itemIdx) => (
-                            <div key={`${node.type_hint}-${itemIdx}`} className="composer-progress__item">
-                              <strong>{it.name}</strong>
-                              <span className="muted">
-                                {[it.personality, it.age, it.location, it.time, it.description].filter(Boolean).join(' · ')}
-                              </span>
-                            </div>
-                          ))}
-                      </div>
-                    </li>
-                  )
-                })}
-              </ol>
-            </div>
-            <div className="composer-progress__bar-wrap">
-              <div className="composer-progress__bar">
-                <div className="composer-progress__bar-fill" style={{ width: `${overallProgress}%` }} />
-              </div>
-              <span className="muted">{overallProgress}%</span>
-            </div>
-          </section>
-        ) : null}
       </form>
+      {progressOpen ? (
+        <div className="composer-modal" role="presentation">
+          <div className="composer-modal__backdrop" onClick={() => setProgressOpen(false)} />
+          <section className="composer-modal__panel" role="dialog" aria-modal="true" aria-label="AI generating content">
+            <header className="composer-modal__head">
+              <h3>AI generating content</h3>
+              <button type="button" className="button-secondary" onClick={() => setProgressOpen(false)}>
+                Close
+              </button>
+            </header>
+            <div className="composer-modal__body" ref={progressScrollRef}>
+              <section className="composer-progress">
+                <p className="muted">Streaming AI generation (fallback disabled).</p>
+                <div className="ai-chat__details-block">
+                  <div className="ai-chat__details-label">Model output</div>
+                  <pre className="ai-chat__pre ai-chat__pre--bounded">{liveOutput || '(waiting for stream...)'}</pre>
+                </div>
+                {liveReasoning ? (
+                  <div className="ai-chat__details-block">
+                    <div className="ai-chat__details-label">Reasoning</div>
+                    <pre className="ai-chat__pre ai-chat__pre--bounded">{liveReasoning}</pre>
+                  </div>
+                ) : null}
+              </section>
+            </div>
+            <footer className="composer-modal__foot">
+              <div className="composer-progress__bar-wrap">
+                <div className="composer-progress__bar">
+                  <div className="composer-progress__bar-fill" style={{ width: `${overallProgress}%` }} />
+                </div>
+                <span className="muted">{overallProgress}%</span>
+              </div>
+            </footer>
+          </section>
+        </div>
+      ) : null}
     </div>
   )
 }

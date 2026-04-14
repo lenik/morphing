@@ -116,6 +116,37 @@ export function CollectionGallery({ currentElementId, author }: Props) {
     )
     try {
       const s = loadSettings()
+      const llmRequestPayload = JSON.stringify(
+        {
+          url: `${(s.openaiApiBaseUrl || '').replace(/\/+$/, '')}/chat/completions`,
+          headers: {
+            Authorization: 'Bearer <OPENAI_API_KEY>',
+            'Content-Type': 'application/json',
+          },
+          body: {
+            model: s.openaiDefaultModel || 'gpt-4o-mini',
+            messages: [
+              {
+                role: 'user',
+                content: `Synthesize one ${targetType} element from collection bundle.`,
+              },
+            ],
+            response_format: { type: 'json_object' },
+            temperature: 0.25,
+            top_p: 0.9,
+            reasoning_effort: 'none',
+          },
+        },
+        null,
+        2,
+      )
+      if (s.showCompleteRequestMessageToLlm) {
+        startOperation(
+          'Morph collection',
+          `Synthesizing a new ${targetType} from bundled member content (may take up to ~2 minutes).`,
+          llmRequestPayload,
+        )
+      }
       const { element: el, ai_trace } = await morphCollectionToType(collectionId, {
         target_type: targetType,
         openai_api_key: s.openaiApiKey || undefined,
@@ -124,7 +155,10 @@ export function CollectionGallery({ currentElementId, author }: Props) {
         show_complete_request_to_llm: s.showCompleteRequestMessageToLlm,
       })
       upsertElement(el)
-      pushTrace(`Morph → ${targetType}`, ai_trace)
+      pushTrace(`Morph → ${targetType}`, {
+        ...ai_trace,
+        llm_request: ai_trace.llm_request || (s.showCompleteRequestMessageToLlm ? llmRequestPayload : undefined),
+      })
       await refresh()
       nav(`/elements/${el.id}`)
     } catch (e) {

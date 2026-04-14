@@ -1,8 +1,8 @@
-import { useEffect, useMemo, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import { Link, useParams } from 'react-router-dom'
 import {
   addComment,
-  completeSlots,
+  completeSlotsStream,
   fetchComments,
   fetchElement,
   fetchVotes,
@@ -53,7 +53,7 @@ import { getElementTier } from '../../domain/elementTier'
 export function ElementWorkspacePanel() {
   const { id } = useParams<{ id: string }>()
   const { upsertElement, elements } = useElementsData()
-  const { startOperation, endOperation, pushTrace, pushNote } = useAiChat()
+  const { startOperation, appendLiveResponse, appendLiveReasoning, setLiveResponse, endOperation, pushTrace, pushNote } = useAiChat()
   const elementsById = useMemo(() => new Map(elements.map((e) => [e.id, e])), [elements])
   const [element, setElement] = useState<Element | null>(null)
   const [comments, setComments] = useState<Comment[]>([])
@@ -77,6 +77,10 @@ export function ElementWorkspacePanel() {
   const [editTags, setEditTags] = useState<string[]>([])
   const [editAuthor, setEditAuthor] = useState('')
   const [editMetadata, setEditMetadata] = useState<Record<string, unknown>>({})
+  const [aiSlotChanges, setAiSlotChanges] = useState<Record<string, { oldValue: string; newValue: string }>>({})
+  const [aiTitleChange, setAiTitleChange] = useState<{ oldValue: string; newValue: string } | null>(null)
+  const [activeAiField, setActiveAiField] = useState<string | null>(null)
+  const titleInputRef = useRef<HTMLInputElement | null>(null)
 
   useEffect(() => {
     if (!id) return
@@ -106,6 +110,9 @@ export function ElementWorkspacePanel() {
     setEditTags([...element.tags])
     setEditAuthor(element.author)
     setEditMetadata({ ...(element.metadata || {}) })
+    setAiSlotChanges({})
+    setAiTitleChange(null)
+    setActiveAiField(null)
   }, [element])
 
   const upstreamIds = useMemo(() => {
@@ -300,7 +307,37 @@ export function ElementWorkspacePanel() {
   async function runAiComplete() {
     setSaveError(null)
     setAiLoading(true)
-    const keyPrompt = `[Slot fill] type=${editType}
+    setAiSlotChanges({})
+    setAiTitleChange(null)
+    const s = loadSettings()
+    const llmRequestPayload = JSON.stringify(
+      {
+        url: `${(s.openaiApiBaseUrl || '').replace(/\/+$/, '')}/chat/completions`,
+        headers: {
+          Authorization: 'Bearer <OPENAI_API_KEY>',
+          'Content-Type': 'application/json',
+        },
+        body: {
+          model: s.openaiDefaultModel || 'gpt-4o-mini',
+          messages: [
+            {
+              role: 'user',
+              content: `[Slot fill] type=${editType}\n[Title] ${editTitle}\n[Body]\n${editContent}`,
+            },
+          ],
+          response_format: { type: 'json_object' },
+          temperature: 0.25,
+          top_p: 0.9,
+          stream: true,
+          reasoning_effort: 'none',
+        },
+      },
+      null,
+      2,
+    )
+    const keyPrompt = s.showCompleteRequestMessageToLlm
+      ? llmRequestPayload
+      : `[Slot fill] type=${editType}
 [Title] ${editTitle}
 [Body excerpt, ${editContent.length} chars total]
 ${editContent.slice(0, 500)}`
@@ -309,9 +346,93 @@ ${editContent.slice(0, 500)}`
       'Calling the model to fill structured metadata slots for this element type (may take up to ~2 minutes).',
       keyPrompt,
     )
+    const simpleMode = !s.showCompleteRequestMessageToLlm
+    const slotLabelByKey = new Map(getViewConfig(editType).slots.map((f) => [f.key, f.label]))
+    const parsedShown = new Map<string, string>()
+    let rawStream = ''
+    const baseTitle = editTitle
+    const baseSlots = { ...slotValues }
+    let lastApplied: Record<string, string> = {}
+
+    const focusField = (key: string) => {
+      setActiveAiField(key)
+      window.setTimeout(() => {
+        if (key === 'title') {
+          const el = titleInputRef.current
+          if (!el) return
+          el.scrollIntoView({ block: 'center', behavior: 'smooth' })
+          el.focus()
+          return
+        }
+        const target = document.querySelector(`[data-ai-field="slot:${key}"] input, [data-ai-field="slot:${key}"] textarea`) as
+          | HTMLInputElement
+          | HTMLTextAreaElement
+          | null
+        if (!target) return
+        target.scrollIntoView({ block: 'center', behavior: 'smooth' })
+        target.focus()
+      }, 0)
+    }
+
+    const applyLiveField = (key: string, val: string) => {
+      if (!val.trim()) return
+      if (key === 'title') {
+        setEditTitle(val)
+        if (val !== baseTitle) setAiTitleChange({ oldValue: baseTitle, newValue: val })
+        else setAiTitleChange(null)
+        focusField('title')
+        return
+      }
+      setEditMetadata((prev) => ({
+        ...prev,
+        slots: {
+          ...mergeSlotsForType(editType, getSlotsMap(prev)),
+          [key]: val,
+        },
+      }))
+      if (val !== (baseSlots[key] || '')) {
+        setAiSlotChanges((prev) => ({ ...prev, [key]: { oldValue: baseSlots[key] || '', newValue: val } }))
+      } else {
+        setAiSlotChanges((prev) => {
+          const next = { ...prev }
+          delete next[key]
+          return next
+        })
+      }
+      focusField(key)
+    }
+
+    const updateSimpleLiveFromRaw = (chunk: string) => {
+      rawStream += chunk
+      const patternObject = /"([a-zA-Z0-9_]+)"\s*:\s*\{\s*"value"\s*:\s*"((?:[^"\\]|\\.)*)"/g
+      const patternPlain = /"([a-zA-Z0-9_]+)"\s*:\s*"((?:[^"\\]|\\.)*)"/g
+      const extracted: Record<string, string> = {}
+      const consume = (re: RegExp) => {
+        let m: RegExpExecArray | null
+        while ((m = re.exec(rawStream)) != null) {
+          const key = m[1]
+          if (key === 'extra_slots' || key === 'slots' || key === 'confidence') continue
+          const val = m[2].replace(/\\"/g, '"').trim()
+          if (!val) continue
+          extracted[key] = val
+        }
+      }
+      consume(patternObject)
+      consume(patternPlain)
+      for (const [k, v] of Object.entries(extracted)) {
+        if (lastApplied[k] !== v) {
+          lastApplied[k] = v
+          applyLiveField(k, v)
+        }
+        parsedShown.set(k, v)
+      }
+      const shown = [...parsedShown.entries()]
+        .map(([k, v]) => `${slotLabelByKey.get(k) || k}: ${v}`)
+        .join('\n')
+      if (shown) setLiveResponse(shown)
+    }
     try {
-      const s = loadSettings()
-      const { accepted_slots, accepted_extra_slots, applied_threshold, ai_trace } = await completeSlots({
+      const { accepted_slots, accepted_extra_slots, accepted_title, accepted_body, applied_threshold, ai_trace } = await completeSlotsStream({
         title: editTitle,
         type_hint: editType,
         content: editContent,
@@ -321,6 +442,14 @@ ${editContent.slice(0, 500)}`
         accept_confidence: s.aiCompletionAcceptConfidence,
         allow_custom_facets: true,
         show_complete_request_to_llm: s.showCompleteRequestMessageToLlm,
+        locale: s.locale,
+      }, {
+        onDelta: (text) => {
+          if (simpleMode) updateSimpleLiveFromRaw(text)
+          else appendLiveResponse(text)
+        },
+        onReasoning: (text) => appendLiveReasoning(text),
+        onErrorEvent: (message) => setLiveResponse(`[stream warning] ${message}`),
       })
       setEditMetadata((prev) => ({
         ...prev,
@@ -330,10 +459,23 @@ ${editContent.slice(0, 500)}`
           ...accepted_extra_slots,
         },
       }))
+      if (accepted_title?.trim()) {
+        setEditTitle(accepted_title.trim())
+        if (accepted_title.trim() !== baseTitle) setAiTitleChange({ oldValue: baseTitle, newValue: accepted_title.trim() })
+      }
+      if (!editContent.trim() && accepted_body?.trim()) {
+        setEditContent(accepted_body.trim())
+      }
       pushTrace(
         'AI Complete',
         {
           ...ai_trace,
+          assistant_excerpt: simpleMode
+            ? Object.entries({ ...accepted_slots, ...accepted_extra_slots })
+              .map(([k, v]) => `${slotLabelByKey.get(k) || k}: ${v}`)
+              .join('\n')
+            : ai_trace.assistant_excerpt,
+          llm_request: ai_trace.llm_request || (s.showCompleteRequestMessageToLlm ? llmRequestPayload : undefined),
           summary: `${ai_trace.summary || ''} · applied>=${applied_threshold.toFixed(2)}`.trim(),
         },
       )
@@ -343,6 +485,23 @@ ${editContent.slice(0, 500)}`
       endOperation()
       setAiLoading(false)
     }
+  }
+
+  function undoAiSlotChange(key: string) {
+    const change = aiSlotChanges[key]
+    if (!change) return
+    onSlotChange(key, change.oldValue)
+    setAiSlotChanges((prev) => {
+      const next = { ...prev }
+      delete next[key]
+      return next
+    })
+  }
+
+  function undoAiTitleChange() {
+    if (!aiTitleChange) return
+    setEditTitle(aiTitleChange.oldValue)
+    setAiTitleChange(null)
   }
 
   function removeCollectionMember(mid: string) {
@@ -460,7 +619,21 @@ ${editContent.slice(0, 500)}`
                 <IconAlignLeft size={14} />
                 Title
               </span>
-              <input required value={editTitle} onChange={(e) => setEditTitle(e.target.value)} />
+              <div className="create-form__field-head">
+                <input
+                  ref={titleInputRef}
+                  required
+                  className={activeAiField === 'title' ? 'create-form__field--ai-focus-input' : ''}
+                  value={editTitle}
+                  onChange={(e) => setEditTitle(e.target.value)}
+                />
+                {aiTitleChange ? (
+                  <button type="button" className="create-form__undo" onClick={undoAiTitleChange} title="Undo AI title change">
+                    <IconRefreshCw size={12} />
+                  </button>
+                ) : null}
+              </div>
+              {aiTitleChange ? <small className="create-form__old-value">Old: {aiTitleChange.oldValue || '(empty)'}</small> : null}
             </label>
             <div className="element-editor__ai-actions">
               <button
@@ -542,6 +715,9 @@ ${editContent.slice(0, 500)}`
               slotValues={slotValues}
               onSlotChange={onSlotChange}
               onSlotDelete={onSlotDelete}
+              aiChanges={aiSlotChanges}
+              onUndoAiChange={undoAiSlotChange}
+              activeAiField={activeAiField}
               shotOrder={editType === 'Shot' ? String(editMetadata.order ?? '') : ''}
               onShotOrderChange={onShotOrderChange}
             />

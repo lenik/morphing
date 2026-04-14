@@ -41,6 +41,7 @@ class AppSettingsPayload(BaseModel):
     useBrowserNotifications: bool = True
     defaultAuthorName: str = ""
     locale: str = "en"
+    elementListLimit: int = 500
 
 
 class AppSettingsHealthCheckResponse(BaseModel):

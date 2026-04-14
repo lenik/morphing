@@ -46,6 +46,9 @@ def app_settings_health_check(
                     "model": model,
                     "messages": [{"role": "user", "content": "Reply exactly: ok"}],
                     "max_tokens": 8,
+                    "temperature": 0.25,
+                    "top_p": 0.9,
+                    "reasoning_effort": "none",
                 },
             )
             if not res.is_success:
